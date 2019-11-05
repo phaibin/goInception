@@ -138,6 +138,8 @@ type sourceOptions struct {
 	sslCA   string // 证书颁发机构（CA）证书
 	sslCert string // 客户端公共密钥证书
 	sslKey  string // 客户端私钥文件
+
+	tranBatch int
 }
 
 // ExplainInfo 执行计划信息
@@ -1541,6 +1543,11 @@ func (s *session) executeAllStatement(ctx context.Context) {
 	}
 
 	count := len(s.recordSets.All())
+	var trans []*Record
+	if s.opt.tranBatch > 1 {
+		trans = make([]*Record, 0, s.opt.tranBatch)
+	}
+
 	for i, record := range s.recordSets.All() {
 
 		// 忽略不需要备份的类型
@@ -1551,7 +1558,42 @@ func (s *session) executeAllStatement(ctx context.Context) {
 
 		s.SetMyProcessInfo(record.Sql, time.Now(), float64(i)/float64(count))
 
-		s.executeRemoteCommand(record)
+		if s.opt.tranBatch > 1 {
+			// 非DML操作时,执行并清空事务集合
+			switch record.Type.(type) {
+			case *ast.InsertStmt, *ast.DeleteStmt, *ast.UpdateStmt,
+				*ast.UseStmt, *ast.SetStmt:
+				if len(trans) < s.opt.tranBatch {
+					trans = append(trans, record)
+				} else {
+					s.executeTransaction(trans)
+					trans = nil
+
+					if s.opt.sleepRows == 1 {
+						mysqlSleep(s.opt.sleep)
+					} else if i%s.opt.sleepRows == 0 {
+						mysqlSleep(s.opt.sleep)
+					}
+				}
+
+			default:
+				if len(trans) > 0 {
+					s.executeTransaction(trans)
+					trans = nil
+				}
+
+				s.executeRemoteCommand(record)
+
+				if s.opt.sleepRows == 1 {
+					mysqlSleep(s.opt.sleep)
+				} else if i%s.opt.sleepRows == 0 {
+					mysqlSleep(s.opt.sleep)
+				}
+			}
+		} else {
+			s.executeRemoteCommand(record)
+		}
+
 		if s.hasErrorBefore() {
 			break
 		}
@@ -1566,7 +1608,7 @@ func (s *session) executeAllStatement(ctx context.Context) {
 			break
 		}
 
-		if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
+		if s.opt.tranBatch <= 1 && s.opt.sleep > 0 && s.opt.sleepRows > 0 {
 			if s.opt.sleepRows == 1 {
 				mysqlSleep(s.opt.sleep)
 			} else if i%s.opt.sleepRows == 0 {
@@ -1592,6 +1634,123 @@ func mysqlSleep(ms int) {
 	return
 
 	// time.Sleep(time.Duration(ms) * time.Millisecond)
+}
+
+func (s *session) executeTransaction(records []*Record) int {
+
+	// 开始事务
+	tx := s.db.Begin()
+
+	// 在事务中做一些数据库操作（从这一点使用'tx'，而不是'db'）
+	// tx.Create(...)
+
+	// ...
+
+	// 发生错误时回滚事务
+	tx.Rollback()
+
+	// if s.opt.backup {
+	// 	masterStatus := s.mysqlFetchMasterBinlogPosition()
+	// 	if masterStatus == nil {
+	// 		s.AppendErrorNo(ErrNotFoundMasterStatus)
+	// 		return
+	// 	} else {
+	// 		record.StartFile = masterStatus.File
+	// 		record.StartPosition = masterStatus.Position
+	// 	}
+	// }
+
+	for _, record := range records {
+
+		s.myRecord = record
+		record.Stage = StageExec
+
+		sql := record.Sql
+		start := time.Now()
+		res := tx.Exec(sql)
+		var err error
+		if errs := res.GetErrors(); len(errs) > 0 {
+			err = errs[0]
+		}
+		record.ExecTime = fmt.Sprintf("%.3f", time.Since(start).Seconds())
+		record.ExecTimestamp = time.Now().Unix()
+
+		if err != nil {
+			tx.Rollback()
+			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+			if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+				s.AppendErrorMessage(myErr.Message)
+			} else {
+				s.AppendErrorMessage(err.Error())
+			}
+			record.StageStatus = StatusExecFail
+
+			// 无法确认是否执行成功,需要通过备份来确认
+			if err == mysqlDriver.ErrInvalidConn {
+				// 如果没有开启备份,则直接返回
+				if s.opt.backup {
+					// 如果是DML语句,则通过备份来验证是否执行成功
+					// 如果是DDL语句,则直接报错,由人工确认执行结果,但仍会备份
+					record.AffectedRows = 0
+					s.AppendErrorMessage("The execution result is unknown! Please confirm manually.")
+
+					record.ThreadId = s.fetchThreadID()
+					record.ExecComplete = true
+				} else {
+					s.AppendErrorMessage("The execution result is unknown! Please confirm manually.")
+				}
+			}
+			break
+		} else {
+			// affectedRows, err := res.RowsAffected()
+			// if err != nil {
+			// 	s.AppendErrorMessage(err.Error())
+			// }
+			// record.AffectedRows = int(affectedRows)
+			record.ThreadId = s.fetchThreadID()
+
+			record.StageStatus = StatusExecOK
+			s.TotalChangeRows += record.AffectedRows
+		}
+
+		if !s.hasError() {
+			record.ExecComplete = true
+		} else {
+			tx.Rollback()
+			break
+		}
+
+		// if !s.hasError() || record.ExecComplete {
+		// 	if s.opt.backup {
+		// 		masterStatus := s.mysqlFetchMasterBinlogPosition()
+		// 		if masterStatus == nil {
+		// 			s.AppendErrorNo(ErrNotFoundMasterStatus)
+		// 			return
+		// 		} else {
+		// 			record.EndFile = masterStatus.File
+		// 			record.EndPosition = masterStatus.Position
+
+		// 			// 开始位置和结束位置一样,无变更
+		// 			if record.StartFile == record.EndFile &&
+		// 				record.StartPosition == record.EndPosition {
+
+		// 				record.StartFile = ""
+		// 				record.StartPosition = 0
+		// 				record.EndFile = ""
+		// 				record.EndPosition = 0
+		// 				return
+		// 			}
+		// 		}
+		// 	}
+
+		// 	record.ExecComplete = true
+		// }
+	}
+	if !s.hasError() {
+		tx.Commit()
+	}
+
+	return 0
 }
 
 func (s *session) executeRemoteCommand(record *Record) int {
@@ -2456,6 +2615,9 @@ func (s *session) parseOptions(sql string) {
 		sslCA:   viper.GetString("sslCa"),
 		sslCert: viper.GetString("sslCert"),
 		sslKey:  viper.GetString("sslKey"),
+
+		// 开启事务功能，设置一次提交多少记录
+		tranBatch: viper.GetInt("tranBatch"),
 	}
 
 	if s.opt.split || s.opt.check || s.opt.Print {
