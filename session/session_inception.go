@@ -1569,10 +1569,14 @@ func (s *session) executeAllStatement(ctx context.Context) {
 					s.executeTransaction(trans)
 					trans = nil
 
-					if s.opt.sleepRows == 1 {
-						mysqlSleep(s.opt.sleep)
-					} else if i%s.opt.sleepRows == 0 {
-						mysqlSleep(s.opt.sleep)
+					trans = append(trans, record)
+
+					if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
+						if s.opt.sleepRows == 1 {
+							mysqlSleep(s.opt.sleep)
+						} else if i%s.opt.sleepRows == 0 {
+							mysqlSleep(s.opt.sleep)
+						}
 					}
 				}
 
@@ -1584,10 +1588,12 @@ func (s *session) executeAllStatement(ctx context.Context) {
 
 				s.executeRemoteCommand(record)
 
-				if s.opt.sleepRows == 1 {
-					mysqlSleep(s.opt.sleep)
-				} else if i%s.opt.sleepRows == 0 {
-					mysqlSleep(s.opt.sleep)
+				if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
+					if s.opt.sleepRows == 1 {
+						mysqlSleep(s.opt.sleep)
+					} else if i%s.opt.sleepRows == 0 {
+						mysqlSleep(s.opt.sleep)
+					}
 				}
 			}
 		} else {
@@ -1616,6 +1622,11 @@ func (s *session) executeAllStatement(ctx context.Context) {
 			}
 		}
 	}
+
+	if s.opt.tranBatch > 1 && len(trans) > 0 {
+		s.executeTransaction(trans)
+		trans = nil
+	}
 }
 
 // mysqlSleep Sleep for a while
@@ -1637,117 +1648,112 @@ func mysqlSleep(ms int) {
 }
 
 func (s *session) executeTransaction(records []*Record) int {
+	if records == nil {
+		return 2
+	}
 
 	// 开始事务
 	tx := s.db.Begin()
 
-	// 在事务中做一些数据库操作（从这一点使用'tx'，而不是'db'）
-	// tx.Create(...)
-
-	// ...
-
-	// 发生错误时回滚事务
-	tx.Rollback()
-
-	// if s.opt.backup {
-	// 	masterStatus := s.mysqlFetchMasterBinlogPosition()
-	// 	if masterStatus == nil {
-	// 		s.AppendErrorNo(ErrNotFoundMasterStatus)
-	// 		return
-	// 	} else {
-	// 		record.StartFile = masterStatus.File
-	// 		record.StartPosition = masterStatus.Position
-	// 	}
-	// }
-
-	for _, record := range records {
-
-		s.myRecord = record
-		record.Stage = StageExec
-
-		sql := record.Sql
-		start := time.Now()
-		res := tx.Exec(sql)
-		var err error
-		if errs := res.GetErrors(); len(errs) > 0 {
-			err = errs[0]
-		}
-		record.ExecTime = fmt.Sprintf("%.3f", time.Since(start).Seconds())
-		record.ExecTimestamp = time.Now().Unix()
-
-		if err != nil {
-			tx.Rollback()
-			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+	res := tx.Exec(fmt.Sprintf("USE `%s`", s.DBName))
+	if errs := res.GetErrors(); len(errs) > 0 {
+		tx.Rollback()
+		for _, err := range errs {
 			if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
 				s.AppendErrorMessage(myErr.Message)
 			} else {
 				s.AppendErrorMessage(err.Error())
 			}
+		}
+		return 2
+	}
+
+	currentThreadId := s.fetchTranThreadID(tx)
+
+	for i, record := range records {
+		s.myRecord = record
+
+		if i == 0 && s.opt.backup {
+			if currentThreadId == 0 {
+				s.AppendErrorMessage("无法获取线程号")
+				tx.Rollback()
+				return 2
+			}
+			masterStatus := s.mysqlFetchMasterBinlogPosition()
+			if masterStatus == nil {
+				s.AppendErrorNo(ErrNotFoundMasterStatus)
+				tx.Rollback()
+				return 2
+			} else {
+				record.StartFile = masterStatus.File
+				record.StartPosition = masterStatus.Position
+			}
+		}
+
+		record.Stage = StageExec
+
+		start := time.Now()
+		res := tx.Exec(record.Sql)
+
+		record.ExecTime = fmt.Sprintf("%.3f", time.Since(start).Seconds())
+		record.ExecTimestamp = time.Now().Unix()
+
+		if errs := res.GetErrors(); len(errs) > 0 {
+			tx.Rollback()
 			record.StageStatus = StatusExecFail
-
-			// 无法确认是否执行成功,需要通过备份来确认
-			if err == mysqlDriver.ErrInvalidConn {
-				// 如果没有开启备份,则直接返回
-				if s.opt.backup {
-					// 如果是DML语句,则通过备份来验证是否执行成功
-					// 如果是DDL语句,则直接报错,由人工确认执行结果,但仍会备份
-					record.AffectedRows = 0
-					s.AppendErrorMessage("The execution result is unknown! Please confirm manually.")
-
-					record.ThreadId = s.fetchThreadID()
-					record.ExecComplete = true
+			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, errs)
+			for _, err := range errs {
+				if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+					s.AppendErrorMessage(myErr.Message)
 				} else {
-					s.AppendErrorMessage("The execution result is unknown! Please confirm manually.")
+					s.AppendErrorMessage(err.Error())
 				}
 			}
-			break
+			return 2
 		} else {
-			// affectedRows, err := res.RowsAffected()
-			// if err != nil {
-			// 	s.AppendErrorMessage(err.Error())
-			// }
-			// record.AffectedRows = int(affectedRows)
-			record.ThreadId = s.fetchThreadID()
+			log.Infof("%s,RowsAffected: %d", record.Sql, res.RowsAffected)
+			record.AffectedRows = int(res.RowsAffected)
+			record.ThreadId = currentThreadId
 
 			record.StageStatus = StatusExecOK
+			record.ExecComplete = true
 			s.TotalChangeRows += record.AffectedRows
 		}
-
-		if !s.hasError() {
-			record.ExecComplete = true
-		} else {
-			tx.Rollback()
-			break
-		}
-
-		// if !s.hasError() || record.ExecComplete {
-		// 	if s.opt.backup {
-		// 		masterStatus := s.mysqlFetchMasterBinlogPosition()
-		// 		if masterStatus == nil {
-		// 			s.AppendErrorNo(ErrNotFoundMasterStatus)
-		// 			return
-		// 		} else {
-		// 			record.EndFile = masterStatus.File
-		// 			record.EndPosition = masterStatus.Position
-
-		// 			// 开始位置和结束位置一样,无变更
-		// 			if record.StartFile == record.EndFile &&
-		// 				record.StartPosition == record.EndPosition {
-
-		// 				record.StartFile = ""
-		// 				record.StartPosition = 0
-		// 				record.EndFile = ""
-		// 				record.EndPosition = 0
-		// 				return
-		// 			}
-		// 		}
-		// 	}
-
-		// 	record.ExecComplete = true
-		// }
 	}
 	if !s.hasError() {
 		tx.Commit()
+
+		if s.opt.backup {
+			record := records[0]
+			masterStatus := s.mysqlFetchMasterBinlogPosition()
+			if masterStatus == nil {
+				s.AppendErrorNo(ErrNotFoundMasterStatus)
+				return 2
+			} else {
+				record.EndFile = masterStatus.File
+				record.EndPosition = masterStatus.Position
+
+				// 开始位置和结束位置一样,无变更
+				if record.StartFile == record.EndFile &&
+					record.StartPosition == record.EndPosition {
+
+					record.StartFile = ""
+					record.StartPosition = 0
+					record.EndFile = ""
+					record.EndPosition = 0
+					return 0
+				}
+			}
+
+			for i, r := range records {
+				if i > 0 {
+					r.StartFile = record.StartFile
+					r.StartPosition = record.StartPosition
+					r.EndFile = record.EndFile
+					r.EndPosition = record.EndPosition
+				}
+			}
+		}
 	}
 
 	return 0
@@ -2403,6 +2409,36 @@ func (s *session) fetchThreadID() uint32 {
 	}
 
 	return s.threadID
+}
+
+func (s *session) fetchTranThreadID(tx *gorm.DB) uint32 {
+
+	var threadId uint64
+	sql := "select connection_id();"
+	rows, err := tx.Raw(sql).Rows()
+	if err != nil {
+		if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+			s.AppendErrorMessage(myErr.Message)
+		} else {
+			s.AppendErrorMessage(err.Error())
+		}
+		return 0
+	} else if rows != nil {
+		for rows.Next() {
+			rows.Scan(&threadId)
+		}
+		rows.Close()
+	}
+
+	var currentThreadId uint32
+
+	if threadId > math.MaxUint32 {
+		currentThreadId = uint32(threadId % (1 << 32))
+	} else {
+		currentThreadId = uint32(threadId)
+	}
+
+	return currentThreadId
 }
 
 func (s *session) modifyBinlogFormatRow() {
