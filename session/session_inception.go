@@ -1691,7 +1691,7 @@ func (s *session) executeTransaction(records []*Record) int {
 	defer func() {
 		if newUseDB != "" {
 			s.DBName = newUseDB
-			log.Info("newUseDB: ", newUseDB)
+			// log.Info("newUseDB: ", newUseDB)
 		}
 	}()
 
@@ -1751,13 +1751,15 @@ func (s *session) executeTransaction(records []*Record) int {
 
 		if errs := res.GetErrors(); len(errs) > 0 {
 			tx.Rollback()
-			record.StageStatus = StatusExecFail
 			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, errs)
-			for _, err := range errs {
-				if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
-					s.AppendErrorMessage(myErr.Message)
-				} else {
-					s.AppendErrorMessage(err.Error())
+			for _, r := range records[:i] {
+				r.StageStatus = StatusExecFail
+				for _, err := range errs {
+					if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
+						r.AppendErrorMessage(myErr.Message)
+					} else {
+						r.AppendErrorMessage(err.Error())
+					}
 				}
 			}
 			return 2
