@@ -30,6 +30,9 @@ import (
 	"github.com/hanchuanchuan/goInception/util/testleak"
 	"github.com/jinzhu/gorm"
 	. "github.com/pingcap/check"
+
+	"github.com/hanchuanchuan/goInception/ast"
+	"github.com/hanchuanchuan/goInception/parser"
 )
 
 var _ = Suite(&testSessionIncTranSuite{})
@@ -54,6 +57,7 @@ type testSessionIncTranSuite struct {
 	realRowCount bool
 
 	remoteBackupTable string
+	parser            *parser.Parser
 }
 
 func (s *testSessionIncTranSuite) SetUpSuite(c *C) {
@@ -101,6 +105,7 @@ func (s *testSessionIncTranSuite) SetUpSuite(c *C) {
 	session.SetLanguage("en-US")
 
 	s.remoteBackupTable = "$_$Inception_backup_information$_$"
+	s.parser = parser.New()
 
 	fmt.Println("ExplicitDefaultsForTimestamp: ", s.getExplicitDefaultsForTimestamp(c))
 	fmt.Println("SQLMode: ", s.getSQLMode(c))
@@ -128,7 +133,7 @@ func (s *testSessionIncTranSuite) TearDownTest(c *C) {
 }
 
 func (s *testSessionIncTranSuite) makeSQL(c *C, tk *testkit.TestKit, sql string) *testkit.Result {
-	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=1;--port=3306;--enable-ignore-warnings;real_row_count=%v;--tran-batch=10;*/
+	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=1;--port=3306;--enable-ignore-warnings;real_row_count=%v;--tran-batch=3;*/
 inception_magic_start;
 use test_inc;
 %s;
@@ -428,111 +433,82 @@ func (s *testSessionIncTranSuite) TestInsert(c *C) {
 	}()
 
 	config.GetGlobalConfig().Inc.CheckInsertField = false
-
-	res := s.makeSQL(c, tk, "drop table if exists t1;create table t1(id int);")
-	row := res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup := s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DROP TABLE `test_inc`.`t1`;", Commentf("%v", res.Rows()))
-
-	s.assertRows(c, res.Rows()[1:], "DROP TABLE `test_inc`.`t1`;")
+	var (
+		res *testkit.Result
+		// row    []interface{}
+		// backup string
+	)
+	res = s.makeSQL(c, tk, "drop table if exists t1;create table t1(id int);")
+	s.assertRows(c, res.Rows()[2:], "DROP TABLE `test_inc`.`t1`;")
 
 	res = s.makeSQL(c, tk, "insert into t1 values(1);")
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
-
-	// 值溢出时的回滚解析
-	res = s.makeSQL(c, tk, `drop table if exists t1;
-        create table t1(id int primary key,
-            c1 tinyint unsigned,
-            c2 smallint unsigned,
-            c3 mediumint unsigned,
-            c4 int unsigned,
-            c5 bigint unsigned
-        );`)
-	res = s.makeSQL(c, tk, "insert into t1 values(1,128,32768,8388608,2147483648,9223372036854775808);")
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
-
-	res = s.makeSQL(c, tk, `drop table if exists t1;
-        create table t1(id int,
-            c1 tinyint unsigned,
-            c2 smallint unsigned,
-            c3 mediumint unsigned,
-            c4 int unsigned,
-            c5 bigint unsigned,
-            c6 decimal unsigned,
-            c7 decimal(4,2) unsigned,
-            c8 float unsigned,
-            c9 double unsigned
-        );`)
-	res = s.makeSQL(c, tk, `insert into t1 values(1,128,32768,8388608,2147483648,9223372036854775808,
-        9999999999,99.99,3.402823466e+38,1.7976931348623157e+308);`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1 AND `c1`=128 AND `c2`=32768 AND "+
-		"`c3`=8388608 AND `c4`=2147483648 AND `c5`=9223372036854775808 AND "+
-		"`c6`=9.999999999e+09 AND `c7`=99.99 AND `c8`=3.4028235e+38 AND `c9`=1.7976931348623157e+308;", Commentf("%v", res.Rows()))
-
-	res = s.makeSQL(c, tk, `update t1 set c1 = 129,
-        c2 = 32769,
-        c3 = 8388609,
-        c4 = 2147483649,
-        c5 = 9223372036854775809,
-        c6 = 9999999990,
-        c7 = 88.88,
-        c8 = 3e+38,
-        c9 = 1e+308
-        where id = 1;`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "UPDATE `test_inc`.`t1` SET `id`=1, `c1`=128, `c2`=32768, "+
-		"`c3`=8388608, `c4`=2147483648, `c5`=9223372036854775808, `c6`=9.999999999e+09, "+
-		"`c7`=99.99, `c8`=3.4028235e+38, `c9`=1.7976931348623157e+308 "+
-		"WHERE `id`=1 AND `c1`=129 AND `c2`=32769 AND `c3`=8388609 AND "+
-		"`c4`=2147483649 AND `c5`=9223372036854775809 AND `c6`=9.99999999e+09 "+
-		"AND `c7`=88.88 AND `c8`=3e+38 AND `c9`=1e+308;", Commentf("%v", res.Rows()))
-
-	res = s.makeSQL(c, tk, `delete from t1 where id = 1;`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "INSERT INTO `test_inc`.`t1`(`id`,`c1`,`c2`,`c3`,`c4`,`c5`,`c6`,`c7`,`c8`,`c9`)"+
-		" VALUES(1,129,32769,8388609,2147483649,9223372036854775809,9.99999999e+09,88.88,3e+38,1e+308);", Commentf("%v", res.Rows()))
-
-	res = s.makeSQL(c, tk, `drop table if exists t1;
-        create table t1(c1 bigint unsigned);`)
-	res = s.makeSQL(c, tk, `insert into t1 values(9223372036854775808);`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `c1`=9223372036854775808;", Commentf("%v", res.Rows()))
-
-	res = s.makeSQL(c, tk, `insert into t1 values(18446744073709551615);`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `c1`=18446744073709551615;", Commentf("%v", res.Rows()))
+	s.assertRows(c, res.Rows()[1:], "DELETE FROM `test_inc`.`t1` WHERE `id`=1;")
 
 	res = s.makeSQL(c, tk, `drop table if exists t1;
 create table t1(id int primary key,c1 varchar(100))default character set utf8mb4;
-insert into t1(id,c1)values(1,'😁😄🙂👩');`)
-	row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	backup = s.query("t1", row[7].(string))
-	c.Assert(backup, Equals, "DELETE FROM `test_inc`.`t1` WHERE `id`=1;", Commentf("%v", res.Rows()))
+insert into t1(id,c1)values(1,'😁😄🙂👩');
+delete from t1 where id=1;`)
+	s.assertRows(c, res.Rows()[3:],
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=1;",
+		"INSERT INTO `test_inc`.`t1`(`id`,`c1`) VALUES(1,'😁😄🙂👩');")
 
-	// // 受影响行数
-	// res = s.makeSQL(c,tk, "drop table if exists t1;create table t1(id int,c1 int);insert into t1 values(1,1),(2,2);")
-	// row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	// c.Assert(row[2], Equals, "0")
-	// c.Assert(row[6], Equals, "2")
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100),c2 int);
 
-	// res = s.makeSQL(c,tk, "drop table if exists t1;create table t1(id int,c1 int );insert into t1(id,c1) select 1,null;")
-	// row = res.Rows()[int(tk.Se.AffectedRows())-1]
-	// c.Assert(row[2], Equals, "0")
-	// c.Assert(row[6], Equals, "1")
+delete from t1 where id>0;
+insert into t1(id,c1) values(1,"1");
+insert into t1(id,c1) values(2,"2");
+insert into t1(id,c1) values(3,"3"),(4,"4");
+update t1 set c1='10' where id>0;`)
+	s.assertRows(c, res.Rows()[3:],
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=1;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=2;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=3;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=4;",
+		"UPDATE `test_inc`.`t1` SET `id`=1, `c1`='1', `c2`=NULL WHERE `id`=1;",
+		"UPDATE `test_inc`.`t1` SET `id`=2, `c1`='2', `c2`=NULL WHERE `id`=2;",
+		"UPDATE `test_inc`.`t1` SET `id`=3, `c1`='3', `c2`=NULL WHERE `id`=3;",
+		"UPDATE `test_inc`.`t1` SET `id`=4, `c1`='4', `c2`=NULL WHERE `id`=4;")
 
-	// sql = "drop table if exists t1;create table t1(c1 char(100) not null);insert into t1(c1) values(null);"
-	// s.testErrorCode(c, sql,
-	//  session.NewErr(session.ER_BAD_NULL_ERROR, "test_inc.t1.c1", 1))
+	s.makeExecSQL(tk, `create database if not exists test;`)
+
+	res = s.makeSQL(c, tk, `drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100),c2 int);
+
+delete from t1 where id>0;
+insert into t1(id,c1) values(1,"1");
+insert into t1(id,c1) values(2,"2");
+insert into t1(id,c1) values(3,"3"),(4,"4");
+update t1 set c1='10' where id>0;
+
+use test;
+drop table if exists t22;
+create table t22(id int primary key,c1 varchar(100),c2 int);
+
+insert into t22(id,c1) values(1,"1");
+insert into t22(id,c1) values(2,"2");
+insert into t22(id,c1) values(3,"3");
+insert into t22(id,c1) values(4,"4");
+insert into t22(id,c1) values(5,"5");
+insert into t22(id,c1) values(6,"6");`)
+	s.assertRows(c, res.Rows()[3:8],
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=1;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=2;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=3;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=4;",
+		"UPDATE `test_inc`.`t1` SET `id`=1, `c1`='1', `c2`=NULL WHERE `id`=1;",
+		"UPDATE `test_inc`.`t1` SET `id`=2, `c1`='2', `c2`=NULL WHERE `id`=2;",
+		"UPDATE `test_inc`.`t1` SET `id`=3, `c1`='3', `c2`=NULL WHERE `id`=3;",
+		"UPDATE `test_inc`.`t1` SET `id`=4, `c1`='4', `c2`=NULL WHERE `id`=4;",
+	)
+	s.assertRows(c, res.Rows()[10:],
+		"DROP TABLE `test`.`t22`;",
+		"DELETE FROM `test`.`t22` WHERE `id`=1;",
+		"DELETE FROM `test`.`t22` WHERE `id`=2;",
+		"DELETE FROM `test`.`t22` WHERE `id`=3;",
+		"DELETE FROM `test`.`t22` WHERE `id`=4;",
+		"DELETE FROM `test`.`t22` WHERE `id`=5;",
+		"DELETE FROM `test`.`t22` WHERE `id`=6;")
 }
 
 func (s *testSessionIncTranSuite) TestUpdate(c *C) {
@@ -1003,7 +979,7 @@ func (s *testSessionIncTranSuite) query(table, opid string) string {
 }
 
 func (s *testSessionIncTranSuite) assertRows(c *C, rows [][]interface{}, rollbackSqls ...string) error {
-	c.Assert(len(rows), Equals, 0)
+	c.Assert(len(rows), Not(Equals), 0)
 
 	inc := config.GetGlobalConfig().Inc
 	if s.db == nil || s.db.DB().Ping() != nil {
@@ -1022,38 +998,73 @@ func (s *testSessionIncTranSuite) assertRows(c *C, rows [][]interface{}, rollbac
 
 	// 有可能是 不同的表,不同的库
 
-	sqlIndex := 0
 	result := []string{}
-	for _, row := range rows {
-		fmt.Println(row[6])
-		affectedRows := row[6].(int)
-		opid := row[7].(string)
-		backupDBName := row[8].(string)
 
-		if affectedRows == 0 || strings.HasSuffix(opid, "00000000") {
+	// affectedRows := 0
+	// opid := ""
+	// backupDBName := ""
+	// sqlIndex := 0
+	for _, row := range rows {
+		opid := ""
+		backupDBName := ""
+		affectedRows := 0
+		if row[6] != nil {
+			a := row[6].(string)
+			affectedRows, _ = strconv.Atoi(a)
+		}
+		if row[7] != nil {
+			opid = row[7].(string)
+		}
+		if row[8] != nil {
+			backupDBName = row[8].(string)
+		}
+		currentSql := ""
+		if row[5] != nil {
+			currentSql = row[5].(string)
+		}
+
+		if !strings.Contains(row[3].(string), "Backup Successfully") || strings.HasSuffix(opid, "00000000") {
 			continue
 		}
 
-		sql := "select tablename from %s.%s where opid_time = ?"
-		sql = fmt.Sprintf(sql, backupDBName, s.remoteBackupTable)
-		tableName := ""
+		// 获取表名（改为从语法中自动获取）
+		// sql := "select tablename from %s.%s where opid_time = ?"
+		// sql = fmt.Sprintf(sql, backupDBName, s.remoteBackupTable)
+		// tableName := ""
+		// rows, err := s.db.Raw(sql, opid).Rows()
+		// c.Assert(err, IsNil)
+		// for rows.Next() {
+		// 	rows.Scan(&tableName)
+		// }
+		// rows.Close()
+
+		// if sqlIndex >= len(rollbackSqls) {
+
+		// }
+
+		tableName := s.getObjectName(currentSql)
+		c.Assert(tableName, Not(Equals), "", Commentf("%v", currentSql))
+
+		sql := "select rollback_statement from %s.`%s` where opid_time = ?;"
+		sql = fmt.Sprintf(sql, backupDBName, tableName)
 		rows, err := s.db.Raw(sql, opid).Rows()
 		c.Assert(err, IsNil)
+		str := ""
+		// count := 0
+
+		result1 := []string{}
 		for rows.Next() {
-			rows.Scan(&tableName)
+			rows.Scan(&str)
+			result1 = append(result1, trim(str))
+			// count++
 		}
 		rows.Close()
 
-		sql = "select rollback_statement from 127_0_0_1_%d_test_inc.`%s` where opid_time = ?;"
-		sql = fmt.Sprintf(sql, inc.BackupPort, tableName)
-		rows, err = s.db.Raw(sql, opid).Rows()
-		c.Assert(err, IsNil)
-		str := ""
-		for rows.Next() {
-			rows.Scan(&str)
-			result = append(result, trim(str))
+		if affectedRows > 0 {
+			c.Assert(affectedRows, Equals, len(result1), Commentf("%v", result1))
 		}
-		rows.Close()
+
+		result = append(result, result1...)
 	}
 
 	c.Assert(len(result), Equals, len(rollbackSqls), Commentf("%v", result))
@@ -1195,7 +1206,10 @@ func (s *testSessionIncTranSuite) TestStatistics(c *C) {
 
 	sql := ""
 
-	sql = "drop table if exists t1;create table t1(id int,c1 int);alter table t1 drop column c1;alter table t1 add column c1 varchar(20);"
+	sql = `drop table if exists t1;
+	create table t1(id int,c1 int);
+	alter table t1 drop column c1;
+	alter table t1 add column c1 varchar(20);`
 	res := s.makeSQL(c, tk, sql)
 	statistics := s.queryStatistics()
 	result := []int{
@@ -1265,4 +1279,102 @@ func (s *testSessionIncTranSuite) TestStatistics(c *C) {
 	for i, v := range statistics {
 		c.Assert(v, Equals, result[i], Commentf("%v", statistics))
 	}
+}
+
+// getObjectName 解析操作表名
+func (s *testSessionIncTranSuite) getObjectName(sql string) (name string) {
+
+	stmtNodes, _, _ := s.parser.Parse(sql, "utf8mb4", "utf8mb4_bin")
+
+	for _, stmtNode := range stmtNodes {
+		switch node := stmtNode.(type) {
+		case *ast.InsertStmt:
+			tableRefs := node.Table
+			if tableRefs == nil || tableRefs.TableRefs == nil || tableRefs.TableRefs.Right != nil {
+				return ""
+			}
+			tblSrc, ok := tableRefs.TableRefs.Left.(*ast.TableSource)
+			if !ok {
+				return ""
+			}
+			if tblSrc.AsName.L != "" {
+				return ""
+			}
+			tblName, ok := tblSrc.Source.(*ast.TableName)
+			if !ok {
+				return ""
+			}
+
+			name = tblName.Name.String()
+
+		case *ast.UpdateStmt:
+			// name = node.Table.Name.String()
+			tableRefs := node.TableRefs
+			if tableRefs == nil || tableRefs.TableRefs == nil || tableRefs.TableRefs.Right != nil {
+				return ""
+			}
+			tblSrc, ok := tableRefs.TableRefs.Left.(*ast.TableSource)
+			if !ok {
+				return ""
+			}
+			if tblSrc.AsName.L != "" {
+				return ""
+			}
+			tblName, ok := tblSrc.Source.(*ast.TableName)
+			if !ok {
+				return ""
+			}
+
+			name = tblName.Name.String()
+		case *ast.DeleteStmt:
+			// name = node.Table.Name.String()
+			tableRefs := node.TableRefs
+			if tableRefs == nil || tableRefs.TableRefs == nil || tableRefs.TableRefs.Right != nil {
+				return ""
+			}
+			tblSrc, ok := tableRefs.TableRefs.Left.(*ast.TableSource)
+			if !ok {
+				return ""
+			}
+			if tblSrc.AsName.L != "" {
+				return ""
+			}
+			tblName, ok := tblSrc.Source.(*ast.TableName)
+			if !ok {
+				return ""
+			}
+
+			name = tblName.Name.String()
+
+		case *ast.CreateDatabaseStmt, *ast.DropDatabaseStmt:
+
+		case *ast.CreateTableStmt:
+			name = node.Table.Name.String()
+		case *ast.AlterTableStmt:
+			name = node.Table.Name.String()
+		case *ast.DropTableStmt:
+			for _, t := range node.Tables {
+				name = t.Name.String()
+				break
+			}
+
+		case *ast.RenameTableStmt:
+			name = node.OldTable.Name.String()
+
+		case *ast.TruncateTableStmt:
+
+			name = node.Table.Name.String()
+
+		case *ast.CreateIndexStmt:
+			name = node.Table.Name.String()
+		case *ast.DropIndexStmt:
+			name = node.Table.Name.String()
+
+		default:
+
+		}
+
+		return name
+	}
+	return ""
 }

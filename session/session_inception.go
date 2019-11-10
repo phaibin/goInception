@@ -1572,6 +1572,7 @@ func (s *session) executeAllStatement(ctx context.Context) {
 			case *ast.UseStmt, *ast.SetStmt:
 				// 环境命令
 				// 事务内部和非事务均需要执行
+				log.Infof("1111: [%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
 				_, err := s.Exec(record.Sql, true)
 				if err != nil {
 					log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
@@ -1582,6 +1583,8 @@ func (s *session) executeAllStatement(ctx context.Context) {
 					}
 					break
 				}
+
+				// s.executeRemoteCommand(record)
 
 				if len(trans) < s.opt.tranBatch {
 					trans = append(trans, record)
@@ -1598,6 +1601,10 @@ func (s *session) executeAllStatement(ctx context.Context) {
 				}
 
 				s.executeRemoteCommand(record)
+
+				// trans = append(trans, record)
+				// s.executeTransaction(trans)
+				// trans = nil
 
 				if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
 					if s.opt.sleepRows == 1 {
@@ -1663,12 +1670,12 @@ func (s *session) executeTransaction(records []*Record) int {
 		return 2
 	}
 
-	for _, record := range records {
-		log.Info("sql: ", record.Sql)
-	}
+	// for _, record := range records {
+	// 	log.Info("sql: ", record.Sql)
+	// }
 
 	// 如果事务最后的命令是use或set命令,则忽略掉
-	// 如果是use命令,在操作完成后记得切换数据库
+	// 如果是use命令,在操作完成后切换会话的数据库
 	newUseDB := ""
 	skipIndex := len(records)
 	for i := len(records) - 1; i >= 0; i-- {
@@ -1687,14 +1694,11 @@ func (s *session) executeTransaction(records []*Record) int {
 
 		break
 	}
-
 	defer func() {
 		if newUseDB != "" {
 			s.DBName = newUseDB
-			// log.Info("newUseDB: ", newUseDB)
 		}
 	}()
-
 	if skipIndex == 0 {
 		return 0
 	} else if skipIndex < len(records)-1 {
@@ -1764,7 +1768,7 @@ func (s *session) executeTransaction(records []*Record) int {
 			}
 			return 2
 		} else {
-			log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, currentThreadId, record.Sql, res.RowsAffected)
+			log.Infof("TRAN!!! [%s] [%d] %s,RowsAffected: %d", s.DBName, currentThreadId, record.Sql, res.RowsAffected)
 			record.AffectedRows = int(res.RowsAffected)
 			record.ThreadId = currentThreadId
 
@@ -2131,6 +2135,7 @@ func (s *session) executeRemoteStatement(record *Record) {
 			log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
 
 			switch node := record.Type.(type) {
+			// switch record.Type.(type) {
 			case *ast.InsertStmt, *ast.DeleteStmt, *ast.UpdateStmt:
 				s.TotalChangeRows += record.AffectedRows
 			case *ast.UseStmt:
