@@ -972,7 +972,7 @@ func (s *testSessionIncTranSuite) query(table, opid string) string {
 		for rows.Next() {
 			str := ""
 			rows.Scan(&str)
-			result = append(result, trim(str))
+			result = append(result, s.trim(str))
 		}
 	}
 	return strings.Join(result, "\n")
@@ -1055,7 +1055,7 @@ func (s *testSessionIncTranSuite) assertRows(c *C, rows [][]interface{}, rollbac
 		result1 := []string{}
 		for rows.Next() {
 			rows.Scan(&str)
-			result1 = append(result1, trim(str))
+			result1 = append(result1, s.trim(str))
 			// count++
 		}
 		rows.Close()
@@ -1127,11 +1127,11 @@ func (s *testSessionIncTranSuite) queryStatistics() []int {
 	return values
 }
 
-func trim(s string) string {
-	if strings.Contains(s, "  ") {
-		return trim(strings.Replace(s, "  ", " ", -1))
+func (s *testSessionIncTranSuite) trim(str string) string {
+	if strings.Contains(str, "  ") {
+		return s.trim(strings.Replace(str, "  ", " ", -1))
 	}
-	return s
+	return str
 }
 
 func (s *testSessionIncTranSuite) getSQLMode(c *C) string {

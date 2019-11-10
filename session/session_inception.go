@@ -1572,10 +1572,10 @@ func (s *session) executeAllStatement(ctx context.Context) {
 			case *ast.UseStmt, *ast.SetStmt:
 				// 环境命令
 				// 事务内部和非事务均需要执行
-				log.Infof("1111: [%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
+				// log.Infof("1111: [%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
 				_, err := s.Exec(record.Sql, true)
 				if err != nil {
-					log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
+					// log.Errorf("con:%d %v", s.sessionVars.ConnectionID, err)
 					if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
 						s.AppendErrorMessage(myErr.Message)
 					} else {
@@ -1768,7 +1768,7 @@ func (s *session) executeTransaction(records []*Record) int {
 			}
 			return 2
 		} else {
-			log.Infof("TRAN!!! [%s] [%d] %s,RowsAffected: %d", s.DBName, currentThreadId, record.Sql, res.RowsAffected)
+			// log.Infof("TRAN!!! [%s] [%d] %s,RowsAffected: %d", s.DBName, currentThreadId, record.Sql, res.RowsAffected)
 			record.AffectedRows = int(res.RowsAffected)
 			record.ThreadId = currentThreadId
 
@@ -2114,7 +2114,7 @@ func (s *session) executeRemoteStatement(record *Record) {
 				}
 			}
 
-			log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
+			// log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
 
 			return
 		} else {
@@ -2132,7 +2132,7 @@ func (s *session) executeRemoteStatement(record *Record) {
 
 			record.StageStatus = StatusExecOK
 
-			log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
+			// log.Infof("[%s] [%d] %s,RowsAffected: %d", s.DBName, s.fetchThreadID(), record.Sql, record.AffectedRows)
 
 			switch node := record.Type.(type) {
 			// switch record.Type.(type) {
