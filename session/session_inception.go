@@ -1558,7 +1558,6 @@ func (s *session) executeAllStatement(ctx context.Context) {
 				} else {
 					s.executeTransaction(trans)
 					trans = nil
-
 					trans = append(trans, record)
 
 					if s.opt.sleep > 0 && s.opt.sleepRows > 0 {
@@ -1590,6 +1589,7 @@ func (s *session) executeAllStatement(ctx context.Context) {
 					trans = append(trans, record)
 				} else {
 					s.executeTransaction(trans)
+
 					trans = nil
 					trans = append(trans, record)
 				}
@@ -1641,10 +1641,10 @@ func (s *session) executeAllStatement(ctx context.Context) {
 		}
 	}
 
-	if s.opt.tranBatch > 1 && len(trans) > 0 {
+	if !s.hasErrorBefore() && s.opt.tranBatch > 1 && len(trans) > 0 {
 		s.executeTransaction(trans)
-		trans = nil
 	}
+	trans = nil
 }
 
 // mysqlSleep Sleep for a while
@@ -1712,6 +1712,7 @@ func (s *session) executeTransaction(records []*Record) int {
 		res := tx.Exec(fmt.Sprintf("USE `%s`", s.DBName))
 		if errs := res.GetErrors(); len(errs) > 0 {
 			tx.Rollback()
+			s.myRecord = records[0]
 			for _, err := range errs {
 				if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
 					s.AppendErrorMessage(myErr.Message)
@@ -1725,7 +1726,8 @@ func (s *session) executeTransaction(records []*Record) int {
 
 	currentThreadId := s.fetchTranThreadID(tx)
 
-	for i, record := range records {
+	for i := range records {
+		record := records[i]
 		s.myRecord = record
 
 		if i == 0 && s.opt.backup {
@@ -1756,14 +1758,21 @@ func (s *session) executeTransaction(records []*Record) int {
 		if errs := res.GetErrors(); len(errs) > 0 {
 			tx.Rollback()
 			log.Errorf("con:%d %v", s.sessionVars.ConnectionID, errs)
-			for _, r := range records[:i] {
+
+			for j := range records {
+				r := records[j]
+				s.myRecord = r
 				r.StageStatus = StatusExecFail
+				r.ExecComplete = false
 				for _, err := range errs {
 					if myErr, ok := err.(*mysqlDriver.MySQLError); ok {
-						r.AppendErrorMessage(myErr.Message)
+						s.AppendErrorMessage(myErr.Message)
 					} else {
-						r.AppendErrorMessage(err.Error())
+						s.AppendErrorMessage(err.Error())
 					}
+				}
+				if j >= i {
+					break
 				}
 			}
 			return 2

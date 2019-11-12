@@ -144,8 +144,17 @@ inception_magic_commit;`
 	for _, row := range res.Rows() {
 		c.Assert(row[2], Not(Equals), "2", Commentf("%v", row))
 	}
-
 	return res
+}
+
+func (s *testSessionIncTranSuite) runTranSQL(sql string, batch int) *testkit.Result {
+	// session.CheckAuditSetting(config.GetGlobalConfig())
+	a := `/*--user=test;--password=test;--host=127.0.0.1;--execute=1;--backup=1;--port=3306;--enable-ignore-warnings;real_row_count=%v;--tran-batch=%d;*/
+inception_magic_start;
+use test_inc;
+%s;
+inception_magic_commit;`
+	return s.tk.MustQueryInc(fmt.Sprintf(a, s.realRowCount, batch, sql))
 }
 
 func (s *testSessionIncTranSuite) makeExecSQL(tk *testkit.TestKit, sql string) *testkit.Result {
@@ -509,6 +518,51 @@ insert into t22(id,c1) values(6,"6");`)
 		"DELETE FROM `test`.`t22` WHERE `id`=4;",
 		"DELETE FROM `test`.`t22` WHERE `id`=5;",
 		"DELETE FROM `test`.`t22` WHERE `id`=6;")
+
+	// 主键冲突时
+	res = s.runTranSQL(`drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100),c2 int);
+insert into t1(id,c1) values(1,"1");
+insert into t1(id,c1) values(2,"2");
+insert into t1(id,c1) values(3,"3");
+insert into t1(id,c1) values(3,"4");
+insert into t1(id,c1) values(5,"5");
+update t1 set c1='10' where id>0;`, 3)
+
+	s.assertRows(c, res.Rows()[3:],
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=1;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=2;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=3;",
+	)
+
+	res = s.runTranSQL(`drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100),c2 int);
+insert into t1(id,c1) values(1,"1");
+insert into t1(id,c1) values(2,"2");
+insert into t1(id,c1) values(3,"3");
+insert into t1(id,c1) values(3,"4");
+insert into t1(id,c1) values(5,"5");
+insert into t1(id,c1) values(6,"6");
+update t1 set c1='10' where id>0;`, 5)
+
+	s.assertRows(c, res.Rows()[3:])
+
+	res = s.runTranSQL(`drop table if exists t1;
+create table t1(id int primary key,c1 varchar(100),c2 int);
+insert into t1(id,c1) values(1,"1");
+insert into t1(id,c1) values(2,"2");
+insert into t1(id,c1) values(3,"3");
+insert into t1(id,c1) values(4,"4");
+insert into t1(id,c1) values(4,"5");
+insert into t1(id,c1) values(6,"6");
+update t1 set c1='10' where id>0;`, 2)
+
+	s.assertRows(c, res.Rows()[3:],
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=1;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=2;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=3;",
+		"DELETE FROM `test_inc`.`t1` WHERE `id`=4;",
+	)
 }
 
 func (s *testSessionIncTranSuite) TestUpdate(c *C) {
