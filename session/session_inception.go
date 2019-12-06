@@ -4037,36 +4037,17 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 
 		fieldType := nc.Tp.CompactStr()
 
-		switch nc.Tp.Tp {
-		case mysql.TypeDecimal, mysql.TypeNewDecimal,
-			mysql.TypeVarchar,
-			mysql.TypeVarString:
-			str := string([]byte(foundField.Type)[:7])
-			if !strings.Contains(fieldType, str) {
-				s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
-					fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-					foundField.Type, fieldType)
+		if !compatible(foundField, nc) {
+			oldNull := "null"
+			if foundField.Null == "NO" {
+				oldNull = "not null"
+			} else {
+				oldNull = "null"
 			}
-		case mysql.TypeString:
-			str := string([]byte(foundField.Type)[:4])
-			if !strings.Contains(fieldType, str) {
-				s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
-					fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-					foundField.Type, fieldType)
-			}
-		default:
-			if strings.Contains(fieldType, "(") && strings.Contains(foundField.Type, "(") {
-				if fieldType[:strings.Index(fieldType, "(")] !=
-					foundField.Type[:strings.Index(foundField.Type, "(")] {
-					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
-						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
-				}
-			} else if fieldType != foundField.Type {
-				s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
-					fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-					foundField.Type, fieldType)
-			}
+			s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
+				fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
+				fmt.Sprintf("%s %s", foundField.Type, oldNull),
+				fmt.Sprintf("%s %s", fieldType, nc.Null()))
 		}
 	}
 
@@ -4083,6 +4064,96 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 	// 			fmt.Sprintf("%s.%s", t.Name, c.Position.RelativeColumn.Name))
 	// 	}
 	// }
+}
+
+func compatible(oldField FieldInfo, newField *ast.ColumnDef) bool {
+	fmt.Println("columnDef: ", newField)
+
+	oldNotNullFlag := oldField.Null == "NO"
+	
+	newNotNullFlag := false
+	if len(newField.Options) > 0 {
+		for _, op := range newField.Options {
+			switch op.Tp {
+			case ast.ColumnOptionNotNull:
+				newNotNullFlag = true
+			case ast.ColumnOptionNull:
+				newNotNullFlag = false
+			}
+		}
+	}
+
+	if !oldNotNullFlag && newNotNullFlag {
+		return false // 不支持从NULL改为NOT NULL
+	}
+
+	oldType := oldField.Type
+	newType := newField.Tp.CompactStr()
+
+	fmt.Println("oldType: ", oldType)
+	fmt.Println("newType: ", newField)
+
+	if strings.Contains(oldType, "(") || strings.Contains(newType, "(") {
+		if strings.Contains(oldType, "(") && strings.Contains(newType, "(") {
+			oldBaseType := oldType[:strings.Index(oldType, "(")]
+			newBaseType := newType[:strings.Index(newType, "(")]
+
+			if oldBaseType == newBaseType {
+				if oldBaseType == "decimal" && oldType != newType {
+					return false // 不支持修改 DECIMAL 类型的精度
+				}
+
+				oldLength := oldType[strings.Index(oldType, "(")+1:strings.Index(oldType, ")")]
+				newLength := newType[strings.Index(newType, "(")+1:strings.Index(newType, ")")]
+				oldLengths := strings.Split(oldLength, ",")
+				newLengths := strings.Split(newLength, ",")
+				if len(oldLengths) == len(newLengths) {
+					for idx, length := range oldLengths {
+						i1, _ := strconv.ParseInt(length, 10, 64)
+						i2, _ := strconv.ParseInt(newLengths[idx], 10, 64)
+						if i1 > i2 {
+							return false
+						}
+					}
+					return true
+				} else {
+					return false
+				}
+			} else {
+				intArray := []string{"tinyint", "samllint", "mediumint", "int", "bigint"}
+				if Contains(intArray, oldBaseType) && Contains(intArray, newBaseType) && indexOf(intArray, oldBaseType) < indexOf(intArray, newBaseType) {
+					return true
+				}
+				textArray := []string{"tinytext", "text", "mediumtext", "longtext"}
+				if Contains(textArray, oldBaseType) && Contains(textArray, newBaseType) && indexOf(textArray, oldBaseType) <= indexOf(textArray, newBaseType) {
+					return true
+				}
+				return false
+			}
+		} else {
+			return false
+		}
+	} else {
+		return false
+	}
+}
+
+func Contains(a []string, x string) bool {
+	for _, n := range a {
+					if x == n {
+									return true
+					}
+	}
+	return false
+}
+
+func indexOf(data []string, element string) (int) {
+	for k, v := range data {
+			if element == v {
+					return k
+			}
+	}
+	return -1    //not found.
 }
 
 // hasError return current sql has errors or warnings
