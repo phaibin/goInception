@@ -449,6 +449,25 @@ func (n *ColumnDef) Validate() bool {
 	return !(generatedCol && illegalOpt4gc)
 }
 
+func (n *ColumnDef) Null() string {
+	notNullFlag := false
+	if len(n.Options) > 0 {
+		for _, op := range n.Options {
+			switch op.Tp {
+			case ColumnOptionNotNull:
+				notNullFlag = true
+			case ColumnOptionNull:
+				notNullFlag = false
+			}
+		}
+	}
+	if notNullFlag {
+		return "not null"
+	} else {
+		return "null"
+	}
+}
+
 // CreateTableStmt is a statement to create a table.
 // See https://dev.mysql.com/doc/refman/5.7/en/create-table.html
 type CreateTableStmt struct {

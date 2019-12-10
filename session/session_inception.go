@@ -4037,6 +4037,43 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 
 		// 列类型转换审核
 		fieldType := nc.Tp.CompactStr()
+
+		oldNotNullFlag := foundField.Null == "NO"
+		oldNull := "null"
+		if foundField.Null == "NO" {
+			oldNull = "not null"
+		} else {
+			oldNull = "null"
+		}
+
+		newNotNullFlag := false
+		if len(nc.Options) > 0 {
+			for _, op := range nc.Options {
+				switch op.Tp {
+				case ast.ColumnOptionNotNull:
+					newNotNullFlag = true
+				case ast.ColumnOptionNull:
+					newNotNullFlag = false
+				}
+			}
+		}
+	
+		if !oldNotNullFlag && newNotNullFlag { // 不支持从NULL改为NOT NULL
+			s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
+				fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
+				fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+				fmt.Sprintf("%s %s", fieldType, nc.Null()))
+			return
+		}
+
+		if (nc.Tp.Tp == mysql.TypeDecimal || nc.Tp.Tp == mysql.TypeNewDecimal) && (foundField.Type != fieldType) { // 不支持修改 DECIMAL 类型的精度
+			s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
+				fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
+				fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+				fmt.Sprintf("%s %s", fieldType, nc.Null()))
+			return
+		}
+
 		if s.Inc.CheckColumnTypeChange && fieldType != foundField.Type {
 			switch nc.Tp.Tp {
 			case mysql.TypeDecimal, mysql.TypeNewDecimal,
@@ -4047,11 +4084,13 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 				if !strings.Contains(fieldType, str) {
 					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
+						fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+						fmt.Sprintf("%s %s", fieldType, nc.Null()))
 				} else if GetDataTypeLength(fieldType)[0] < GetDataTypeLength(foundField.Type)[0] {
 					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
+						fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+						fmt.Sprintf("%s %s", fieldType, nc.Null()))
 				}
 			case mysql.TypeString:
 				str := string([]byte(foundField.Type)[:4])
@@ -4059,11 +4098,13 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 				if !strings.Contains(fieldType, str) {
 					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
+						fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+						fmt.Sprintf("%s %s", fieldType, nc.Null()))
 				} else if GetDataTypeLength(fieldType)[0] < GetDataTypeLength(foundField.Type)[0] {
 					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
+						fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+						fmt.Sprintf("%s %s", fieldType, nc.Null()))
 				}
 			default:
 				// log.Info(fieldType, ":", foundField.Type)
@@ -4078,7 +4119,8 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 					if newTypeIndex < oldTypeIndex {
 						s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 							fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-							foundField.Type, fieldType)
+							fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+							fmt.Sprintf("%s %s", fieldType, nc.Null()))
 					}
 				} else if oldType == newType &&
 					(oldType == "enum" || oldType == "set") {
@@ -4086,7 +4128,8 @@ func (s *session) checkModifyColumn(t *TableInfo, c *ast.AlterTableSpec) {
 				} else {
 					s.AppendErrorNo(ER_CHANGE_COLUMN_TYPE,
 						fmt.Sprintf("%s.%s", t.Name, nc.Name.Name),
-						foundField.Type, fieldType)
+						fmt.Sprintf("%s %s", foundField.Type, oldNull), 
+						fmt.Sprintf("%s %s", fieldType, nc.Null()))
 				}
 			}
 		}
